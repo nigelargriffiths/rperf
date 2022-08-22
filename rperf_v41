@@ -1,0 +1,644 @@
+#!/usr/bin/ksh93
+VERSION=41
+DATE=20July2022
+# rperf estimating script
+# No restrictions, copy and use at will, this is just sample code.
+# No warrentee given or implied.
+# Numbers taken from Power Systems Facts and Features document easily found on the WWW
+# set LANG to ensure "." decimal place handling
+export LANG=C
+
+machine=$(lsattr -El sys0 -a modelname -F value)
+cpus=$(lsdev -Cc processor | grep Available | wc -l | sed 's/ //g')
+procstr=$(lsdev -Cc processor | grep Available | head -1 | cut -d' ' -f1)
+proctype=$(lsattr -El $procstr | awk '/^type/ {print $2}')
+Hz=$(lsattr -El ${procstr%% *} -a frequency -F value)
+
+# Ensure that procspeed is not null, since the conversion to MHz below will
+# cause the script to exit with an error if null.
+# Force MHz to be an integer
+typeset -i MHz
+if [[ ! -z $Hz ]]
+then
+    # Convert Hz to MHz, and round up or down
+    if (( ($Hz%1000000) >= 500000 ))
+    then
+    (( MHz=($Hz/1000000) + 1 ))
+    else
+    (( MHz=($Hz/1000000) ))
+    fi
+else
+	echo MHz rating is not available, exiting
+	exit 2
+fi
+
+# break the MHz in to the first two digits (enough for the lookup) and the rest
+dd=${MHz:0:2}
+ff=${MHz:2:9}
+
+# This first attempt does not round up the lower digits!
+#  ff=${ff//[0-9]/0}
+# so below we round down, round up and round to 50
+
+if(( $ff < 10 ))  # if below 10 i.e.  01 and 09 round down
+then
+	ff=${ff//[0-9]/0}
+elif(( $ff > 90 ))  # if bigger than 90 round up
+then
+	ff=${ff//[0-9]/0}
+	let dd=$dd+1
+elif(( $ff > 40 ))
+then
+	if(( $ff < 60 )) # near 50 so make it 50
+	then
+		ff=50
+	fi
+fi
+
+roundedMHz=$dd$ff
+# Debug and testing machines other than the current one
+# Set shell variables LOOKUP and CPUS, examples below
+#	export LOOKUP=IBM,9119-FHA_5000_256
+#	export CPUS=34
+#	export LOOKUP=IBM,9119-FHB_4000_256
+#	export CPUS=255
+#	export LOOKUP=IBM,9110-51A_1900_2
+#	export CPUS=2
+#	export LOOKUP=IBM,9109-RMD_3400_48
+#	export CPUS=48
+#	export LOOKUP=IBM,8408-E8E_3700_32
+#	export CPUS=32
+#
+if [ "$LOOKUP" == "" ] 
+then
+	lookup=${machine}_${roundedMHz}_${cpus}
+else
+	echo rperf Debug mode using your shell variable LOOKUP 
+	lookup=$LOOKUP
+	echo LOOKUP=$lookup
+	debug=1
+fi
+if [ "$CPUS" != "" ] 
+then
+	echo rperf Debug mode using your shell variable CPUS 
+	cpus=$CPUS
+	echo CPUS=$cpus
+fi
+
+hostname=""
+
+while getopts ehvH opt
+do
+	case $opt in
+	v) # verbose and entitlement 
+		verbose=1
+		entmode=1 
+		;;
+	e) # entitmenent wanted
+		entmode=1 
+		;;
+	h) # display hostname
+		hostname=$(hostname -s)
+		;;
+	H)
+	echo "rperf -v -e -h -H"
+	echo "  -v = verbose mode and Entitlement (-e)"
+	echo "  -e = output Entitlement rating and Capped / Uncapped state (in addition)"
+	echo "  -h = output the short hostname at the start of the line "
+	echo "  -H = Help = this output"
+	echo 
+	echo rperf outputs the performance number of the current machine or LPAR
+	echo "either Relative Performance (rPerf) or Relative OLTP (roltp)"
+	echo Depending on the age of the machine.
+	echo There is no simple way to convert from roltp to rPerf - sorry.
+	echo
+	echo If it says estimated then it is NOT an official number.
+	echo For LPARs the number may be estimated but it is a simple maths calculation
+	echo i.e. if we have the official number for 4 CPUs then a 1 CPU LPAR is simply
+	echo a fourth - this will be a small under estimate.
+	echo
+	echo rperf script wiki page - for latest version and reporting issues
+	echo  https://www.ibm.com/developerworks/community/wikis/home#!/wiki/Power%20Systems/page/rperf
+	echo 
+	echo e-mail to nag@uk.ibm.com
+	exit
+	;;
+	esac
+done
+
+if [ "$verbose" == "1" ]
+then
+	echo Information is from public documents from www.ibm.com
+	echo -- - IBM Power Systems Performance Report and Archive
+	echo -- - rperf script Version:$VERSION Date:$DATE
+	if [ "$debug" != "1" ] # if in debug mode outputing the current machine is confusing
+	then
+		echo Machine=$machine MHz=$MHz Rounded-MHz=$roundedMHz CPUs=$cpus CPU-Type=$proctype
+	fi
+	echo lookup $lookup
+fi
+
+# below is the default but changed to roltp or estimated where necessary
+units=rPerf
+estimated="official"
+
+calculate()
+{
+	if [ "$verbose" == "1" ]
+	then
+		echo calculate cpus=$cpus from $* 
+	fi
+	if [ "$1" == "" ]
+	then 
+		return
+	fi
+	if((cpus==$1))
+	then
+		rating=$2
+		return
+	fi
+	if((cpus<$1))
+	then
+		let rating=$2/$1*$cpus; 
+		estimated="estimated"
+	fi
+} 
+
+matchup()
+{
+# Debug echo matchup 1=$1 2=$2 3=$3 4=$4 5=$5 6=$6 7=$7 8=$8 9=$9 10=${10} 11=$11 12=$12 13=$13 14=$14 arguments= $#
+if [ "$verbose" == "1" ]
+then
+	echo matchup $*
+fi
+	rating=0
+	if(($#>=2)) then calculate $1 $2 ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=4)) then calculate $3 $4 ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=6)) then calculate $5 $6 ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=8)) then calculate $7 $8 ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=10)) then calculate $9 ${10} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=12)) then calculate ${11} ${12} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=14)) then calculate ${13} ${14} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=16)) then calculate ${15} ${16} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=18)) then calculate ${17} ${18} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=20)) then calculate ${19} ${20} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=22)) then calculate ${21} ${22} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=24)) then calculate ${23} ${24} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=26)) then calculate ${25} ${26} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=28)) then calculate ${27} ${28} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=30)) then calculate ${29} ${30} ; fi;
+	if((rating != 0)) then return; fi;
+	if(($#>=32)) then calculate ${31} ${32} ; fi;
+}
+
+case $lookup in
+	IBM,7043-150_250_1) rating=0.18;;
+	IBM,7043-150_375_1) rating=0.26;;
+	IBM,7043-260_200_1) rating=10.5; units=roltp ;;
+	IBM,7043-260_200_2) rating=21.0; units=roltp ;;
+	IBM,7044-170_333_1) rating=0.58 ;;
+	IBM,7044-170_400_1) rating=0.73 ;;
+	IBM,7044-170_450_1) rating=0.79 ;;
+	IBM,7044-270_375_1) rating=1.00 ;;
+	IBM,7044-270_375_2) rating=1.92 ;;
+	IBM,7044-270_375_3) rating=2.55 ;;
+	IBM,7044-270_375_4) rating=3.47 ;;
+	IBM,7044-270_375_2) rating=1.99 ;;
+	IBM,7044-270_375_4) rating=3.59 ;;
+	IBM,7044-270_450_2) rating=2.27 ;;
+	IBM,7044-270_450_4) rating=4.01 ;;
+
+	IBM,7025-F80_450_1)  rating=23.0; units=roltp ;;
+	IBM,7025-F80_450_2)  rating=50.0; units=roltp ;;
+	IBM,7025-F80_450_4)  rating=87.7; units=roltp ;;
+	IBM,7025-F80_500_6)  rating=111.9; units=roltp ;;
+	IBM,7025-F80_600_1)  rating=32.3; units=roltp ;;
+	IBM,7025-F80_600_2)  rating=69.0; units=roltp ;;
+	IBM,7025-F80_600_4)  rating=117.0; units=roltp ;;
+	IBM,7025-F80_500_6)  rating=191.2; units=roltp ;;
+
+	IBM,7025-6F0_450_1) rating=0.93 ;;
+	IBM,7025-6F0_450_2) rating=2.02 ;;
+	IBM,7025-6F0_450_4) rating=3.55 ;;
+	IBM,7025-6F0_600_1) rating=1.26 ;;
+	IBM,7025-6F0_600_2) rating=2.69 ;;
+	IBM,7025-6F0_600_4) rating=4.57 ;;
+	IBM,7025-6F0_750_1) rating=1.91 ;;
+	IBM,7025-6F0_750_2) rating=3.49 ;;
+	IBM,7025-6F0_750_4) rating=5.85 ;;
+	IBM,7025-6F1_450_1) rating=0.93 ;;
+	IBM,7025-6F1_450_2) rating=2.02 ;;
+	IBM,7025-6F1_450_4) rating=3.55 ;;
+	IBM,7025-6F1_668_6) rating=7.46 ;;
+	IBM,7025-6F1_600_1) rating=1.26 ;;
+	IBM,7025-6F1_600_2) rating=2.69 ;;
+	IBM,7025-6F1_600_4) rating=4.57 ;;
+	IBM,7025-6F1_750_1) rating=1.91 ;;
+	IBM,7025-6F1_750_2) rating=3.49 ;;
+	IBM,7025-6F1_750_4) rating=5.85 ;;
+	IBM,7025-6F1_750_6) rating=8.23 ;;
+
+	IBM,7017-S80_450_6) rating=161.7; units=roltp ;;
+	IBM,7017-S80_450_12) rating=306.7; units=roltp ;;
+	IBM,7017-S80_450_18) rating=428.7; units=roltp ;;
+	IBM,7017-S80_450_24) rating=533.3; units=roltp ;;
+	IBM,7017-S80_600_6) rating=219.0; units=roltp ;;
+	IBM,7017-S80_600_12) rating=416.0; units=roltp ;;
+	IBM,7017-S80_600_18) rating=583.3; units=roltp ;;
+	IBM,7017-S80_600_24) rating=736.0; units=roltp ;;
+	
+	IBM,7040-681_1100_*) matchup 8 18.02 16 34.66 24 48.11 32 60.66  0 0 ;;
+	IBM,7040-681_1300_*) matchup 8 21.20 16 40.92 24 56.46 32 71.44 0 0 ;;
+	IBM,7040-681_1500_*) matchup 8 24.18 16 46.79 24 64.99 32 81.95 0 0 ;;
+	IBM,7040-681_1700_*) matchup 8 27.11 16 52.45 24 16.29 32 92.19 0 0 ;;
+	IBM,7040-681_1900_*) matchup 8 30.63 16 59.26 24 82.32 32 104.17 0 0 ;;
+
+	IBM,9115-505_1500_2) rating=9.13 ;;
+
+	# The 1 CPU zero L2 cache model has a low rPerf 
+	#- here we assume it is not popular and you have a an 1 VP CPU LPAR
+	# IBM,9115-505_1650_1) rating=3.51 ;;
+	IBM,9115-505_1650_1) let rating=9.86/2; estimated="estimated i.e. assuming its not the 1 CPU with zero L2 model" ;;
+
+	IBM,9115-505_1650_*) matchup 2 9.86 4 20.25 0 0 ;;
+	IBM,9115-505_1900_*) matchup 1 4.10 2 11.49 0 0 ;;
+
+	IBM,9115-505_2100_*) calculate 2 12.46 ;;
+
+	IBM,9110-51A_1500_*) matchup 1 3.25 2 9.13 4 18.75 ;;
+	IBM,9110-510_1650_*) matchup 1 5.24 2 9.86 4 20.25 ;;
+
+	IBM,9110-51A_1900_*) matchup 1 6.11 2 11.49;;
+
+	IBM,9110-51A_2100_*) matchup 1 6.63 2 12.46 0 0 ;;
+	IBM,9111-520_1500_*) matchup 1 3.25 2 9.13 0 0 ;;
+	IBM,9111-520_1650_*) calculate 2 9.86 ;;
+	IBM,9131-52A_1650_*) matchup 1 3.62 2 10.15 4 20.25 ;;
+	IBM,9131-52A_1900_*) calculate 2 11.16 ;;
+	IBM,9131-52A_1500_*) calculate 4 18.75 ;;
+	IBM,9131-52A_2100_*) matchup 1 6.63 2 12.46 0 0 ;;
+	IBM,9133-55A_1500_*) matchup 4 18.20 8 34.46 0 0;;
+	IBM,9133-55A_1650_*) matchup 2 10.15 4 20.25 8 38.34 ;;
+	IBM,9133-55A_1900_*) matchup 2 11.16 4 22.26 0 0 ;;
+	IBM,9133-55A_2100_*) matchup 2 12.46 4 24.86 0 0;;
+	IBM,9113-550_1500_*) matchup 1 3.25 2 9.13 4 18.20 ;;
+	IBM,9113-550_1650_*) matchup 2 9.86 4 19.66 0 0 ;;
+	IBM,9116-561_1500_*) matchup 4 18.75 8 35.50 16 65.24 ;;
+	IBM,9116-561_1800_*) matchup 4 21.72 8 41.12 16 75.58 ;;
+	IBM,9117-570_1500_*) matchup 2 9.13 4 18.20 8 34.46 ;;
+	IBM,9117-570_1650_*) matchup 2 9.86 4 19.66 8 37.22 12 53.43 16 68.40 ;;
+
+	# darn we have two machines at same MHz for POWER5 and POWER5+
+	IBM,9117-570_1900_*) 
+	if [ $proctype == "POWER5+" ]
+	then
+		matchup 2 12.27 4 24.18 8 46.36 12 66.55 16 95.96
+	else
+		matchup 2 11.16 4 22.26 8 42.14 12 60.50 16 77.45
+	fi;;
+
+	IBM,9117-570_2200*) 
+        if [ $proctype == "POWER5+" ]
+        then
+		matchup 2 13.83 4 27.58 8 52.21 12 74.95 16 95.96
+        else
+                matchup 2 10.63 4 21.21 8 42.16 12 57.65 16 73.81
+        fi;;
+
+
+	IBM,9119-590_1650_*) matchup 8 41.68 16 80.86 24 16.29 32 151.72 0 0 ;;
+	IBM,9119-590_2100_*) matchup 8 55.74 16 108.13 24 155.51 32 202.88 0 0 ;;
+	IBM,9119-595_1650_*) matchup 16 80.86 24 116.29 32 151.72 40 182.07 48 212.41 56 242.76 64 273.10;;
+	IBM,9119-595_1900_*) matchup 16 90.67 24 130.39 32 170.11 40 204.14 48 238.16 56 272.18 64 306.21;;
+	IBM,9119-595_2100_*) matchup 16 108.13 24 155.51 32 202.88 40 243.46 48 284.04 56 324.61 64 365.19;;
+	IBM,9119-595_2300_*) matchup 16 116.13 24 167.58 32 218.64 40 262.37 48 306.10 56 349.83 64 393.55 ;;
+
+	# JS21 Blades
+	IBM,7988-J21_2700_*) calculate 2  5.31;;
+	IBM,7988-J21_2500_*) calculate 4  8.72;;
+
+	# POWER6
+	# JS12 and JS22 Blades
+	IBM,7998-60X_3800_*) calculate 2 14.71;;
+	IBM,7998-61X_4000_*) calculate 4 30.26;;
+	# 520
+	IBM,8203-E4A_4200_*) matchup 1 8.39 2 15.95 4 31.48 ;;
+	# 550
+	IBM,8204-E8A_3500_*) matchup 2 15.85 4 31.27 6 45.04 8 58.80;;
+	IBM,8204-E8A_4200_*) matchup 2 18.38 4 36.28 6 52.24 8 68.20;;
+	# 570
+	IBM,9117-MMA_3500_*) matchup 2 15.85 4 31.69 8 58.95 12  83.35 16 105.75 ;;
+	# POWER6 IBM,9117-MMA_4200_*) matchup 2 18.38 4 36.76 8 68.38 12  96.68 16 122.67 ;;
+	# POWER6+
+	IBM,9117-MMA_4200_*) matchup 4 35.50 8 64.96 16 113.68 24 153.46 32 193.25 ;;
+	IBM,9117-MMA_4700_*) matchup 2 20.13 4 40.26 8 74.89 12 105.89 16 134.35 ;;
+	# POWER6+
+	IBM,9117-MMA_4400_*) matchup 2 19.08 4 38.16 8 70.97 12 100.35 16 127.32 ;;
+	IBM,9117-MMA_5000_*) matchup 2 21.16 4 42.32 8 78.71 12 111.30 16 141.21 ;;
+
+	# 595
+	IBM,9119-FHA_4200_*) matchup 8 75.58 16 142.90 24 204.70 32 266.51 40 320.05 48 373.60 56 426.74 64 479.89 ;;
+	IBM,9119-FHA_5000_*) matchup 8 87.10 16 164.67 24 235.90 32 307.12 40 368.82 48 430.53 56 491.77 64 553.01 ;;
+
+	# Older POWER4 and POWER4+ Models added in rperf v7
+	IBM,7028-6C4_1000_*) matchup 1 1.72 2 3.68 4 7.12 0 0 ;;
+	IBM,7028-6C4_1200_*) matchup 1 2.50 2 4.00 4 8.05 0 0 ;;
+	IBM,7028-6C4_1450_*) matchup 1 2.94 2 4.41 4 8.69 0 0 ;;
+	IBM,7028-6E4_1000_*) matchup 1 1.72 2 3.68 4 7.12 0 0 ;;
+	IBM,7028-6E4_1200_*) matchup 1 2.50 2 4.00 4 8.05 0 0 ;;
+	IBM,7028-6E4_1450_*) matchup 1 2.94 2 4.41 4 8.69 0 0 ;;
+
+	IBM,7029-6C3_1200_1) rating=2.50 ;;
+	IBM,7029-6C3_1200_2) rating=4.00 ;;
+	IBM,7029-6C3_1450_2) rating=4.41 ;;
+
+	IBM,7038-6M2_1200_*) matchup 2 4.00 4 8.05 6 11.77 8 15.49 ;;
+	IBM,7038-6M2_1450_*) matchup 2 4.47 4 9.12 6 13.47 8 18.67 ;;
+
+	IBM,7039-651_1100_8) rating=12.00 ;;
+	IBM,7039-651_1300_4) rating=9.05 ;;
+	IBM,7039-651_1500_8) rating=21.87 ;;
+	IBM,7039-651_1700_4) rating=15.22 ;;
+
+	IBM,7040-671_1100_*) matchup 4 10.18 8 18.02 16 34.66 ;;
+	IBM,7040-671_1500_*) matchup 4 13.66 8 24.18 16 46.79 ;;
+
+	# New Addtions for rperf v8 - thanks Michael P
+	# JS23 and JS43 Blades  - thanks Michel M
+	IBM,7778-23X_4200_*) matchup  4 36.28  8 68.2  ;;
+
+
+	# - - - Supplied uncheck by Jose Luis Hansen
+	# IBM Flex System Compute Nodes p260 p460
+	# POWER7 p260
+	IBM,7895-22X_33*_*)  calculate  8  92.8 ;; #p260
+	IBM,7895-22X_322*_*) calculate 16 163.8 ;; #p260
+	IBM,7895-22X_3550_*) calculate 16 176.6 ;; #p260
+	# POWER7+ p260
+	IBM,7895-23A_40*_*)  calculate  4  61.2 ;; #p260
+	IBM,7895-23X_40*_*)  calculate  8 115.5 ;; #p260
+	IBM,7895-23X_36*_*)  calculate 16 197.7 ;; #p260
+	IBM,7895-23X_41*_*)  calculate 16 218.5 ;; #p260
+	# POWER7 p460
+	IBM,7895-42X_33*_*)  calculate 16 174.0 ;; #p460
+	IBM,7895-42X_322*_*) calculate 32 307.0 ;; #p460
+	IBM,7895-42X_3550_*) calculate 32 331.1 ;; #p460
+	# POWER7+ p460
+	IBM,7895-43X_40*_*)  calculate 16 225.0 ;; #p460
+	IBM,7895-43X_36*_*)  calculate 32 372.6 ;; #p460
+	IBM,7895-43X_41*_*)  calculate 32 411.7 ;; #p460
+	# - - - thanks Jose Luis Hansen
+
+
+	# New faster CPUs for POWER6
+	IBM,8203-E4A_4700_*) matchup  2 20.13  4 39.73  ;;
+	IBM,8204-E8A_5000_*) matchup  2 21.18  4 41.81  6 60.2   8 78.6  ;;
+	IBM,8234-EMA_3600_*) matchup  4 31.32  8 57.3  16 100.3  ;;
+	IBM,9119-FHA_4200_*) matchup  8  72.58  16 142.9  24 204.7   32 266.51  40 320.05  48 373.6  56 426.74  64 479.89 ;;
+	IBM,9119-FHA_5000_*) matchup 16 164.67  24 235.9  32 307.12  40 368.82  48 430.53  56 491.77  64 553.01  ;;
+
+	# POWER7 Power 750 from May 2010
+	IBM,8233-E8B_30*_*) matchup  8  81.24  16 155.99  24 224.23  32 292.47  ;;
+	IBM,8233-E8B_33*_*) matchup  8  86.99  16 167.01  24 240.08  32 313.15  ;;
+	IBM,8233-E8B_35*_*) matchup  32 331.06  ;;
+	# POWER7 Power 750 April 2011
+	IBM,8233-E8B_32*_*) matchup  8  85.29  16 163.75  24 235.39  32 307.03  ;;
+	IBM,8233-E8B_36*_*) matchup  8  93.05  16 178.65  24 256.81  32 334.97  ;;
+	IBM,8233-E8B_37*_*) matchup  4 52.90 6 76.71 8 101.67 12 146.00 16 190.44 18 211.71 24 276.14  ;;
+	# POWER7+ Power 750 Feb 2013
+	IBM,8408-E8D_35*_*) matchup  8  104.5 16 197.0 24 275.9 32 354.9  ;;
+	IBM,8408-E8D_40*_*) matchup  8  117.1 16 220.7 24 309.2 32 397.7  ;;
+	# POWER7+ Power 760 Feb 2013
+	IBM,9109-RMD_31*_*) matchup  12  142.1 24 264.8 36 370.7 48 476.7  ;;
+	IBM,9109-RMD_34*_*) matchup  12  151.4 24 282.1 36 395.0 48 507.8  ;;
+
+	# Power 755 assuming 750 rPerf numbers are OK
+	IBM,8236-E8C_3300_*) matchup  8  86.99  16 167.01  24 240.08  32 313.15  ;;
+	# Power 755 June 2012 - no values present yet for 3.6 GHz version.
+	# Made ESTIMATION based on number above 36/33 * 313.15 = 341.62
+	IBM,8236-E8C_3600_*) matchup  32 341.62  ;;  # ESTIMATE
+
+	# Power 770 
+	IBM,9117-MMB_31*_*) matchup  16 165.30 32 306.74 48 443.06 64 579.39 ;;
+	IBM,9117-MMB_35*_*) matchup  12 140.75 24 261.19 36 377.26 48 493.37 ;;
+	# Power 770 C models - Nov 2011
+	IBM,9117-MMC_33*_*) matchup  16 173.1 32 321.2 48 464.0 64 606.8 ;;
+	IBM,9117-MMC_37*_*) matchup  12 147.5 24 273.7 36 395.4 48 517.0 ;;
+	# Power 770 D models - Oct 2012
+	IBM,9117-MMD_38*_*) matchup  16 219.3 32 410.8 48 570.1 64 729.3 ;;
+	IBM,9117-MMD_42*_*) matchup  12 184.2 24 345.1 36 478.9 48 612.7 ;;
+
+	# Power 780
+	IBM,9179-MHB_386*_*) matchup 16 195.45  32 362.7   48 523.89  64 685.09  ;;
+	IBM,9179-MHB_414*_*) matchup  8 115.16  16 226.97  24 326.24  32 425.5   ;;
+	IBM,9179-MHB_415*_*) matchup  8 115.16  16 226.97  24 326.24  32 425.5   ;; # marketing think it is 4.14 GHz but the machine say 4.15 GHz
+	# Power 780 C models - Nov 2011
+	IBM,9179-MHC_344*_*) matchup 24 253.3  48 443.3  72 696.6  96 886.6 ;;
+	IBM,9179-MHC_392*_*) matchup 16 197.6  32 366.6  48 529.6  64 692.5 ;;
+	IBM,9179-MHC_415*_*) matchup  8 115.9  16 227.0  24 326.2  32 425.5 ;; 
+	IBM,9179-MHC_414*_*) matchup  8 115.9  16 227.0  24 326.2  32 425.5 ;; # June 2012 - Copied from 4.15 GHz version.
+	# Power 780 D models - Oct 2012 - no more Turbo-Core
+	IBM,9179-MHD_37*_*) matchup 32 383.9  64 690.1  96 1151.6 128 1380.2 ;;
+	IBM,9179-MHD_44*_*) matchup 16 245.7  32 460.3  48 638.7   64 817.1 ;;
+
+	# POWER7 Blades April 2010
+	IBM,8406-70Y_3000*) calculate 4 45.13 ;; #PS700
+	IBM,8406-71Y_3000*) matchup   8 81.24 16 154.36 ;; # PS701 and 702
+
+	# POWER7 Blades April 2010
+	IBM,7891-73X_2400*) calculate   16 134.11 ;; # PS703 
+	IBM,7891-74X_2400*) calculate   32 251.45 ;; # PS704
+
+	# POWER7 Power 710 and 730 August 2010
+	IBM,8231-E2B_30*_*) matchup   4 45.13 8 86.66 ;; 
+	IBM,8231-E2B_37*_*) matchup   6 76.69 8 101.62 12 147.24 ;; 
+	IBM,8231-E2B_35*_*) matchup   8 91.96 16 176.57 ;; 
+	# POWER7 Power 710 and 730 C models  - Nov 2011
+        IBM,8231-E1C_30*_*) matchup   4 45.13 ;;
+        IBM,8231-E1C_37*_*) matchup   6 76.69 ;;
+        IBM,8231-E1C_35*_*) matchup   8 91.96 ;;
+	IBM,8231-E2C_30*_*) matchup   4 45.13 8 86.66 ;; 
+	IBM,8231-E2C_37*_*) matchup   6 76.69 8 101.62 12 147.24 ;; 
+	IBM,8231-E2C_35*_*) matchup   8 91.96 16 176.57 ;; 
+	# POWER7+ Power 710 and 730 D models  - Feb 2013
+	IBM,8231-E1D_36*_*) matchup   4 53.9 ;; 
+	IBM,8231-E1D_42*_*) matchup   6 90.6 8 115.5 ;; 
+
+	IBM,8268-E1D_36*_*) matchup   4 53.9 ;; 
+	IBM,8268-E1D_42*_*) matchup   6 90.6 8 115.5 ;; 
+
+	IBM,8231-E2D_43*_*) matchup   8 120.4 ;;
+	IBM,8231-E2D_42*_*) matchup   12 176.6 16 223.1 ;;
+	IBM,8231-E2D_36*_*) matchup   16 197.8 ;;
+
+	# POWER7 Power 720 and 740 August 2010
+	IBM,8202-E4B_30*_*) matchup   4 45.13 6 65.52 8 81.24 ;; 
+	IBM,8202-E4B_33*_*) matchup   4 48333 8 92.79 ;; 
+	IBM,8202-E4B_37*_*) matchup   4 52.93 8 101.62 12 147.24 ;; # available in 4 or 6 core versions with some crossover 
+	IBM,8202-E4B_35*_*) matchup   8 91.96 16 176.57 ;; 
+        # POWER7 Power 740 Express - October 2011
+        IBM,8205-E6B_33*_*) matchup   4 48.33 8 92.79 ;;
+        IBM,8205-E6B_37*_*) matchup   4 52.93 6 76.69 8 101.62 12 147.24 ;;
+        IBM,8205-E6B_35*_*) matchup   8 91.96 16 176.57 ;;
+        IBM,8205-E6C_33*_*) matchup   4 48.33 8 92.79 ;;
+        IBM,8205-E6C_37*_*) matchup   4 52.93 6 76.69 8 101.62 12 147.24 ;;
+        IBM,8205-E6C_35*_*) matchup   8 91.96 16 176.57 ;;
+	# Power 720 and 740 C models - same rPerf and B models - Nov 2011
+	IBM,8202-E4C_30*_*) matchup   4 45.13 6 65.52 8 81.24 ;; 
+	IBM,8202-E4C_33*_*) matchup   4 48.33 8 92.79 ;; 
+	IBM,8202-E4C_37*_*) matchup   4 52.93 6 76.69 8 101.62 12 147.24 ;; # available in 4 or 6 core versions with some crossover 
+	IBM,8202-E4C_3550*) matchup   8 91.96 16 176.57 ;; 
+	# POWER7+ Power 720 and 740 D models - Feb 2013
+	IBM,8202-E4D_36*_*) matchup   4 53.9 6 79.5 8 102.4 ;; 
+	IBM,8205-E6D_42*_*) matchup   6 90.6 8 115.5 12 176.6 18 233.1 ;; # available in 6 or 8 core versions with some crossover
+	IBM,8205-E6D_36*_*) matchup   8 102.4 16 197.7 ;; 
+
+	# POWER7 Power 795  August 2010
+	IBM,9119-FHB_37*_*) matchup 24 273.51  192 2188.08 ;; # 6 core
+	IBM,9119-FHB_40*_*) matchup 32 372.27  256 2978.16 ;; # 8 core
+	IBM,9119-FHB_42*_*) matchup 24 347.36 48 694.71  128 1852.56 ;; #Turbo core
+
+	# POWER8 Scale Out June 2014
+	IBM,8284-22A_39*_*) matchup  6 120.8  12 235.6 ;; # S822
+	IBM,8284-22A_38*_*) matchup  6 120.8  12 235.6 ;; # S822 same as above 3.89 GHx could be reported 3.8 or 3.9
+	IBM,8284-22A_41*_*) matchup  8 155.1  16 302.4 ;; # S822 new in 2015 - note maximum of SMT=4
+	IBM,8284-22A_34*_*) matchup 10 177.8  20 346.7 ;; # S822
+
+	IBM,8286-41A_30*_*) matchup  4 66.9    6  97.5 ;; # S814 new 4 CPU model in 2015
+	IBM,8286-41A_37*_*) matchup  8 143.9           ;; # S814
+
+	IBM,8286-42A_39*_*) matchup 6 120.8   12 235.6 ;; # S824
+	IBM,8286-42A_38*_*) matchup 6 120.8   12 235.6 ;; # S824 same as above 3.89 GHx could be reported 3.8 or 3.9
+	IBM,8286-42A_41*_*) matchup 8 166.0   16 323.6 ;; # S824
+	IBM,8286-42A_35*_*) matchup 24 421.9           ;; # S824
+
+	# POWER8 E850 May 2015
+        IBM,8408-E8E_30*_*) matchup 24 383.0 48 746.9  ;; # E850 3.02 GHz
+        IBM,8408-E8E_33*_*) matchup 20 347.8 40 678.3  ;; # E850 3.35 GHz
+        IBM,8408-E8E_37*_*) matchup 16 304.5 32 593.8  ;; # E850 3.72 GHz
+
+	# POWER8 E870 Oct 2014
+        IBM,9119-MME_40*_*) matchup 32 674.5 64 1349.0 ;; # E870 4.02 GHz
+        IBM,9119-MME_41*_*) matchup 40 856.0 80 1711.9 ;; # E870 4.19 GHz
+
+	# POWER8 E880 Oct 2014 - updated Oct 2016
+        IBM,9119-MHE_40*_*) matchup 48 976.4 96 1952.9 192 3905.8 ;; # E880 4.02 GHz
+        IBM,9119-MHE_41*_*) matchup 40 856.0 80 1711.9 160 3424.0 ;; # E880 4.19 GHz New
+        IBM,9119-MHE_43*_*) matchup 32 716.3 64 1432.5 128 2865.0 ;; # E880 4.35 GHz
+
+	# POWER8 E850C Oct 2016 Cloud Server = faster GHz ratings
+        IBM,8408-44E_36*_*) matchup 12 221.0 24 440.7 36 640.0 48 859.3  ;; # E850 3.65 GHz
+        IBM,8408-44E_39*_*) matchup 10 197.0 20 393.1 30 579.8 40 766.5  ;; # E850 3.95 GHz
+        IBM,8408-44E_42*_*) matchup 8  168.0 16 334.7 24 493.7 32 652.7  ;; # E850 4.22 GHz
+
+	# POWER8 E870C Oct 2016 Cloud Server = different machine-type, only 4 GHz and exactly the same rperfs
+        IBM,9080-MME_40*_*) matchup 32 674.5 64 1349.0 ;; # E870 4.02 GHz
+
+	# POWER8 E880C Oct 2016 Cloud Server = different machine-type, all GHz and exactly the same rperfs
+        IBM,9080-MHE_40*_*) matchup 48 976.4 96 1952.9 192 3905.8 ;; # E880 4.02 GHz
+        IBM,9080-MHE_41*_*) matchup 40 856.0 80 1711.9 160 3424.0 ;; # E880 4.19 GHz
+        IBM,9080-MHE_43*_*) matchup 32 716.3 64 1432.5 128 2865.0 ;; # E880 4.35 GHz
+
+	# POWER9 Scale-Out April 2018 + 11 & 22 core + S914 few% higher  + G models July 2020
+	IBM,9009-42[AG]_33*_*) matchup  8 219.4 16 427.8 ;; # S924  8/16 core P9
+	IBM,9009-42[AG]_29*_*) matchup 10 256.1 20 499.5 ;; # S924 10/20 core P9
+	IBM,9009-42[AG]_27*_*) matchup 12 299.0 24 583.1 ;; # S924 12/24 core P9
+	IBM,9009-42[AG]_*_*)   matchup 11 278.6 22 540.6 ;; # S924 11/22 core P9 unknown GHz
+
+	IBM,9009-41[AG]_23*_*) matchup  4  80.9 6 118.6;; # S914 4/6 core P9
+	IBM,9009-41[AG]_28*_*) matchup  8 183.2 ;;        # S914 8   core P9
+
+	IBM,9009-22[AG]_23*_*) matchup  4 89.8           ;; # S924  4    core P9
+	IBM,9009-22[AG]_30*_*) matchup  8 202.3 16 394.5 ;; # S924  8/16 core P9
+	IBM,9009-22[AG]_25*_*) matchup 10 218.6 20 426.4 ;; # S924 10/20 core P9
+	IBM,9009-22[AG]_*_*)   matchup 11 233.9 22 456.1 ;; # S924 11/22 core P9 unknown GHz
+	
+	# POWER9 Enterprise E950 August 2018
+	IBM,9040-MR9_285*_*) matchup  24 587.8 48 1146.4 ;; # S950  11 core P9
+	IBM,9040-MR9_28*_*)  matchup  22 549.6 44 1071.9 ;; # S950  12 core P9
+	IBM,9040-MR9_30*_*)  matchup  20 530.2 40 1034.1 ;; # S950  10 core P9
+	IBM,9040-MR9_33*_*)  matchup  16 446.3 32  870.4 ;; # S950   8 core P9
+
+	# POWER9 Enterprise E980 August 2018
+	IBM,9080-M9S_29*_*)  matchup  8 228.8 12 334.0 16 457.3 20 554.3 24 651.3 28 760.7 32 870.1 36 960.6 40 1073.3 44 1171.7 48 1270.2 96 2540.4 144 3810.6 192 5081.7 ;; # E980  12 core P9 48 per CEC
+	IBM,9080-M9S_30*_*)  matchup  8 230.6 12 336.7 16 461.0 20 558.8 24 656.6 28 766.9 32 877.2 36 968.4 40 1082.0 44 1181.4           88 2362.9 132 3544.3 176 4725.8 ;; # E980  11 core P9 44 per CEC
+	IBM,9080-M9S_31*_*)  matchup  8 234.0 12 341.6 16 467.7 20 566.9 24 666.1 28 778.0 32 889.8 36 982.4 40 1098.1                     80 2196.2 120 3294.3 160 4392.4 ;; # E980  10 core P9 40 per CEC
+	IBM,9080-M9S_34*_*)  matchup  8 239.1 12 349.1 16 477.9 20 579.3 24 680.7 28 795.0 32 910.0                                        64 1820.0 96 2729.9 128 3639.9 ;;  # E980   8 core P9 32 per CEC
+
+	# Power10 Enterprise E1080 Sept 2021
+	IBM,9080-HEX_365*_*) matchup 40 1366.8  80 2733.6 120 4100.4 160 5467.1 ;; # E1080  10 core P10 40 per CEC
+	IBM,9080-HEX_36*_*)  matchup 48 1680.6  96 3361.2 144 5041.8 192 6722.3 ;; # E1080  12 core P10 48 per CEC
+	IBM,9080-HEX_35*_*)  matchup 60 1999.7 120 3999.3 180 5999.0 240 7998.6 ;; # E1080  15 core P10 60 per CEC
+	IBM,9080-HEX_34*_*)  matchup 48 1200.0  96 2400.0 144 3600.0 192 4800.0 ;; # ESP Beta server 12 core
+
+	# Power10 Enterprise E1050 July 2022
+	IBM,9043-MRX_335*_*) matchup 24  818.7 36 1207.4 48 1596.6 ;; # E1050  6 core P10 
+	IBM,9043-MRX_32*_*)  matchup 36 1136.5 54 1676.1 72 2216.4 ;; # E1050  9 core P10 
+	IBM,9043-MRX_295*_*) matchup 48 1378.8 72 2033.5 96 2688.9 ;; # E1050  12 core P10 
+
+	# Power10 Scale-Out July 2022 S1024 and S1022
+	IBM,9105-42A_34*_*) matchup 12 415.7 24 810.6 ;;  # S1024  6 core P10 1 and 2 socket
+	IBM,9105-42A_31*_*) matchup 32 1013.4 ;;          # S1024  8 core P10 2 socket
+	IBM,9105-42A_27*_*) matchup 48 1331.8 ;;          # S1024 12 core P10 2 socket
+
+	IBM,9105-22A_29*_*) matchup 12  358.5 24 699.2 ;; # S1022  6 core P10 1 and 2 socket
+	IBM,9105-22A_27*_*) matchup 32  924.1 ;;          # S1022  8 core P10 2 socket
+	IBM,9105-22A_24*_*) matchup 40 1024.1 ;;          # S1022 12 core P10 2 socket
+
+	# Power10 Scale-Out July 2022 L1024 and L1022
+	IBM,9786-42H_34*_*) matchup 12 415.7 24 810.6 ;;  # S1024  6 core P10 1 and 2 socket
+	IBM,9786-42H_31*_*) matchup 32 1013.4 ;;          # S1024  8 core P10 2 socket
+	IBM,9786-42H_27*_*) matchup 48 1331.8 ;;          # S1024 12 core P10 2 socket
+
+	IBM,9786-22H_29*_*) matchup 12  358.5 24 699.2 ;; # S1022  6 core P10 1 and 2 socket
+	IBM,9786-22H_27*_*) matchup 32  924.1 ;;          # S1022  8 core P10 2 socket
+	IBM,9786-22H_24*_*) matchup 40 1024.1 ;;          # S1022 12 core P10 2 socket
+
+	# Power10 Scale-Out July 2022 S1014 and LS022s
+	IBM,9105-41B_3*_*)  matchup  4 129.4 8 254.2 ;;        # S1014 4/8 core
+	IBM,9105-22B_3*_*)  matchup  4 129.4 8 254.2 16 477.8 ;; # S1022s 4 and 8 core P10 1 and 2 socket
+	
+
+
+	*) rating=unknown; units=unknown;;
+esac
+
+if (( $rating == 0 ))
+then 
+	rating=unknown
+	units=unknown
+fi
+
+if [ "$hostname" != "" ]
+then
+	printf "%s "  $hostname
+fi
+printf "%.2f %s %s based on %.2f Virtual CPU cores\n" "$rating" "$units" "$estimated" "$cpus"
+
+if [ "$entmode" == "1" ]
+then
+	cappedstr=$(lparstat -i | grep "^Mode" | awk '{print $(NF)}')
+	entitledcpu=$(lparstat -i | grep "^Entitled Capacity " | grep -v Pool | awk '{print $(NF)}')
+	singlecorefactor=$((1.00/$cpus))
+	entitledrating=$(($rating*$singlecorefactor*$entitledcpu))
+
+	if [ "$hostname" != "" ]
+	then
+		printf "%s "  $hostname
+	fi
+	printf "%.2f %s estimated based on %.2f %s Entitlement CPU cores\n" "$entitledrating" "$units" "$entitledcpu" "$cappedstr"
+fi
