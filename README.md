@@ -4,6 +4,7 @@ Run this script of your AIX server to estimate the rPerf rating for that particu
 
 ## See Article on the AIXpert Blog
 - https://www.ibm.com/support/pages/get-rperf-performance-rating-your-aix-lpar
+- https://www.ibm.com/support/pages/sizing-rperf-dont-forget-assumptions
 
 ![RS6000_Model44p_270](https://github.com/nigelargriffiths/rperf/assets/48133721/ec882662-71cd-4116-adf3-3eaa841c87c4)
 
